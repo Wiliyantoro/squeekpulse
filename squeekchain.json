@@ -1,0 +1,9 @@
+{
+  "name": "squeekpulse",
+  "description": "Wheel Integrity Radar — independent read-only monitor of the settlement lag between the WHEELY9000 live measurement and on-chain settled work (SqueekCore, Sepolia). A Squeekchain Genesis Buildooooor project by 7tomars.",
+  "member": "7tomars",
+  "wallet": "0xF24AEC532Ac4C9aba1B8CA7697b0c8d05a489885",
+  "urls": {
+    "repository": "https://github.com/7tomars/squeekpulse"
+  }
+}
