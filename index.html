@@ -68,6 +68,23 @@ Data: <code>api.squeekchain.com/v1</code> · chain Sepolia (pinned 12 blocks beh
     <div class="kv"><span>installation</span><b id="inst">…</b></div>
   </div>
   <div class="card" style="grid-column:1/-1">
+    <h2>⚡ Holder actions <span class="tag">non-custodial</span></h2>
+    <div style="font-size:13px;color:var(--dim)">
+      Radar ini tetap read-only. Untuk <b>claim &amp; stake SQK satu klik</b>, buka
+      <a href="https://wiliyantoro.github.io/squeekfi/" rel="noopener">SqueekFi Hub → tab “Stake Actions”</a>
+      (sign tetap di wallet lu — situs tidak pernah pegang kunci).
+      Planner compound/merge juga ada di sana (pakai <code>quotePower()</code> kontrak asli).
+    </div>
+  </div>
+  <div class="card" style="grid-column:1/-1">
+    <h2>🔔 Alert center <span class="tag">client-side rules</span></h2>
+    <div id="alerts" class="dim" style="font-size:13px">listening…</div>
+    <div style="font-size:12px;color:var(--dim);margin-top:6px">
+      Rules: Index &lt;70 warn · &lt;40 crit · measurement stale · settlement incident.
+      Dedupe 10 menit. Riwayat alert disimpan lokal (localStorage) — tidak ada data yang dikirim ke mana pun.
+    </div>
+  </div>
+  <div class="card" style="grid-column:1/-1">
     <h2>Settlement lag history (last 60 samples)</h2>
     <canvas id="spark" width="900" height="64"></canvas>
   </div>
@@ -183,8 +200,37 @@ function render(d){
   drawSpark(hist);
 }
 
+// ---- Alert center (client-side, dedupe 10 menit) ----
+let alertLog=JSON.parse(localStorage.getItem("squeekpulse.alerts.v1")||"[]");
+function fireAlert(kind,level,msg){
+  const now=Date.now();
+  if(alertLog.some(a=>a.kind===kind&&now-a.ts<600000))return;
+  const a={ts:now,kind,level,msg};
+  alertLog.push(a);alertLog=alertLog.slice(-50);
+  localStorage.setItem("squeekpulse.alerts.v1",JSON.stringify(alertLog));
+  renderAlerts();
+}
+function renderAlerts(){
+  const el=$("alerts");if(!el)return;
+  if(!alertLog.length){el.textContent="no alerts yet — all rules quiet ✅";return}
+  el.innerHTML=alertLog.slice().reverse().map(a=>
+    '<div style="margin:2px 0">['+new Date(a.ts).toLocaleTimeString()+'] <b style="color:'+(a.level==="crit"?"var(--bad)":a.level==="warn"?"var(--warn)":"var(--dim)")+'">'+a.level.toUpperCase()+'</b> '+a.msg+'</div>').join("");
+}
+function checkAlerts(s){
+  if(!s)return;
+  if(s.sc<40)fireAlert("index","crit","Integrity Index CRITICAL: "+s.sc+"/100");
+  else if(s.sc<70)fireAlert("index","warn","Integrity Index dropped: "+s.sc+"/100");
+  if(s.ageS>s.stale)fireAlert("stale","warn","measurement STALE ("+Math.round(s.ageS)+"s)");
+  if(s.why&&s.why.some(w=>/incident/.test(w)))fireAlert("incident","crit","settlement incident open");
+}
+renderAlerts();
+
 async function tick(){
-  try{render(await pull())}
+  try{const d=await pull();render(d);
+    // hitung ulang skor utk alert (render sudah set DOM)
+    const sc=parseInt($("score").textContent)||null;
+    if(sc!==null){checkAlerts({sc,ageS:parseFloat(($("age").textContent||"").replace(/[^0-9.]/g,""))||0,stale:120,why:($("scoreWhy").textContent||"").split("·")});}
+  }
   catch(e){$("scoreWhy").textContent="fetch problem: "+e.message+" (retrying — no fabricated data)"}
 }
 tick();setInterval(tick,3000);
