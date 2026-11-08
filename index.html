@@ -1,239 +1,649 @@
 <!DOCTYPE html>
 <html lang="en">
+<!--
+  SQUEEKPULSE v3 — wheel integrity radar for Squeekchain
+  Hand-built. No framework, no webfonts, no analytics, no tracker.
+  Data sources (all public, read-only):
+    - squeek-core  : /api/integrity, /api/history, /api/stream (SSE)   <- same origin
+    - upstream     : api.squeekchain.com/v1 (dipoll squeek-core, bukan browser lu)
+  Operator: 7tomars · attribution: squeekchain.json · keys: none. ever.
+
+  changelog
+    v3.0.0  2026-11-08  rewrite. canonical score dari squeek-core (gak ada lagi
+                        recompute client-side — satu formula, satu kebenaran).
+                        history dari server (/api/history), bukan localStorage.
+                        SSE live tick + backoff. holder actions card baru.
+                        stale ditampilkan jujur: kalau pipe dingin, kami bilang.
+    v2.x    2026-11-07  alert center + holder actions cross-link (dipertahankan, di-rewire)
+    v1.0    2026-11-05  radar pertama
+-->
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="SqueekPulse — real-time Wheel Integrity Radar for Squeekchain. Monitors settlement lag, measurement freshness and oracle health between the live wheel reading and on-chain settled work.">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https://api.squeekchain.com; img-src data:;">
-<title>SqueekPulse — Wheel Integrity Radar for Squeekchain</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="SqueekPulse v3 — real-time Wheel Integrity Radar for Squeekchain. Independent, keyless, read-only.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:;">
+<title>SqueekPulse — Wheel Integrity Radar</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%23c8f542' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%23c8f542'/%3E%3Cpath d='M16 5v6M16 21v6M5 16h6M21 16h6' stroke='%23c8f542' stroke-width='2'/%3E%3C/svg%3E">
 <style>
-:root{--bg:#0d1117;--card:#161b22;--edge:#30363d;--fg:#e6edf3;--dim:#8b949e;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--acc:#f97316}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--fg);font:15px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;padding:24px;max-width:960px;margin:0 auto}
-h1{font-size:22px;letter-spacing:.5px}
-h1 .pulse{color:var(--acc)}
-.sub{color:var(--dim);font-size:13px;margin:4px 0 20px}
-.sub a{color:var(--acc);text-decoration:none}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
-.card{background:var(--card);border:1px solid var(--edge);border-radius:10px;padding:16px}
-.card h2{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin-bottom:10px}
-.big{font-size:30px;font-weight:700}
-.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dim{color:var(--dim)}
-.kv{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed #21262d;font-size:13px}
-.kv:last-child{border-bottom:0}
-.kv span:first-child{color:var(--dim)}
-#gauge{width:100%;height:8px;background:#21262d;border-radius:4px;margin:10px 0 4px}
-#gaugeFill{height:8px;border-radius:4px;background:var(--ok);transition:width .6s,background .6s}
-#spark{width:100%;height:64px;display:block}
-footer{margin-top:20px;color:var(--dim);font-size:12px;border-top:1px solid var(--edge);padding-top:12px}
-.tag{display:inline-block;font-size:11px;border:1px solid var(--edge);border-radius:6px;padding:1px 7px;margin-left:6px;color:var(--dim)}
-#age{font-size:11px;color:var(--dim)}
+  /* ---- tokens. tuned by eye, not by committee ---- */
+  :root{
+    --bg:#0c0e10;
+    --bg2:#111418;
+    --panel:#13171c;
+    --line:#232a31;
+    --line2:#2e3740;
+    --ink:#e8ece9;
+    --dim:#8b9691;
+    --faint:#5c665f;
+    --acc:#c8f542;          /* radar green — satu-satunya warna brand */
+    --warn:#f5c542;
+    --crit:#f5645c;
+    --mono:ui-monospace,'JetBrains Mono','Cascadia Mono',Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{color-scheme:dark}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:15px;
+    line-height:1.45;
+    background-image:repeating-linear-gradient(0deg,transparent 0 2px,rgba(255,255,255,.006) 2px 4px);
+  }
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,.mono{font-family:var(--mono)}
+  ::selection{background:var(--acc);color:#0c0e10}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:var(--line2);border-radius:6px}
+
+  .wrap{max-width:1080px;margin:0 auto;padding:0 20px}
+
+  /* ---- ticker ---- */
+  #ticker{
+    border-bottom:1px solid var(--line);
+    background:var(--bg2);
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--dim);
+    overflow:hidden;white-space:nowrap;
+  }
+  #ticker .cell{display:inline-block;padding:6px 18px;border-right:1px solid var(--line)}
+  #ticker b{color:var(--ink);font-weight:600}
+
+  /* ---- header ---- */
+  header{padding:22px 0 18px;border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .brand svg{flex:none}
+  .brand h1{font-size:19px;font-weight:700;letter-spacing:.06em}
+  .brand h1 span{color:var(--acc)}
+  .brand .sub{color:var(--faint);font-size:12.5px;font-family:var(--mono)}
+  .badges{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+  .pill{
+    font-family:var(--mono);font-size:11px;letter-spacing:.04em;
+    border:1px solid var(--line2);border-radius:99px;padding:4px 11px;color:var(--dim);
+  }
+  .pill.ok{border-color:rgba(200,245,66,.45);color:var(--acc)}
+  .pill.warn{border-color:rgba(245,197,66,.5);color:var(--warn)}
+  .pill.crit{border-color:rgba(245,100,92,.5);color:var(--crit)}
+
+  /* ---- hero: gauge + verdict ---- */
+  .hero{display:grid;grid-template-columns:230px 1fr;gap:26px;padding:26px 0 22px;align-items:center}
+  @media(max-width:720px){.hero{grid-template-columns:1fr;justify-items:center;text-align:center}}
+  .gauge-box{position:relative;text-align:center}
+  .gauge-num{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center}
+  .gauge-num .n{font-family:var(--mono);font-size:42px;font-weight:700;line-height:1}
+  .gauge-num .of{color:var(--faint);font-size:11px;font-family:var(--mono);letter-spacing:.15em}
+  .verdict h2{font-size:21px;font-weight:650;margin-bottom:6px}
+  .verdict p{color:var(--dim);max-width:56ch}
+  .verdict .fine{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:10px}
+
+  /* ---- panels grid ---- */
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding-bottom:8px}
+  @media(max-width:860px){.grid{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .panel>h3{
+    font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--dim);padding:11px 16px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:8px;
+  }
+  .panel>h3 .dot{width:7px;height:7px;border-radius:50%;background:var(--acc);flex:none}
+  .panel>h3 .dot.warn{background:var(--warn)}
+  .panel>h3 .dot.crit{background:var(--crit)}
+  .panel .body{padding:14px 16px}
+  .panel .wide{grid-column:1/-1}
+
+  /* chart */
+  #chart{width:100%;height:190px;display:block;cursor:crosshair}
+  .chart-meta{display:flex;gap:16px;font-family:var(--mono);font-size:11px;color:var(--faint);padding:8px 16px 12px;flex-wrap:wrap}
+  .chart-meta b{color:var(--dim);font-weight:600}
+  #chartTip{
+    position:fixed;pointer-events:none;display:none;z-index:9;
+    background:#0a0c0e;border:1px solid var(--line2);border-radius:6px;
+    font-family:var(--mono);font-size:11px;padding:6px 9px;color:var(--ink);
+  }
+
+  /* kv rows */
+  table.kv{width:100%;border-collapse:collapse;font-size:13.5px}
+  table.kv td{padding:6.5px 0;border-bottom:1px dashed var(--line);vertical-align:top}
+  table.kv tr:last-child td{border-bottom:none}
+  table.kv td:first-child{color:var(--dim)}
+  table.kv td:last-child{text-align:right;font-family:var(--mono);font-size:13px}
+  table.kv .ok{color:var(--acc)} table.kv .warn{color:var(--warn)} table.kv .bad{color:var(--crit)}
+
+  /* alerts */
+  #al-list .empty{color:var(--faint);font-size:13px;font-style:italic}
+  .alert-row{display:flex;gap:10px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px;align-items:baseline}
+  .alert-row:last-child{border-bottom:none}
+  .alert-row .t{font-family:var(--mono);font-size:11px;color:var(--faint);flex:none;width:88px}
+  .alert-row .lv{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;flex:none;width:44px}
+  .alert-row .lv.info{color:var(--acc)} .alert-row .lv.warn{color:var(--warn)} .alert-row .lv.crit{color:var(--crit)}
+
+  /* holder actions */
+  .acts{display:grid;gap:10px}
+  .act{
+    display:flex;align-items:center;gap:14px;padding:12px 14px;
+    border:1px solid var(--line2);border-radius:8px;background:var(--bg2);
+    transition:border-color .15s ease;
+  }
+  .act:hover{border-color:rgba(200,245,66,.4);text-decoration:none}
+  .act .ic{
+    width:34px;height:34px;flex:none;border-radius:7px;
+    display:flex;align-items:center;justify-content:center;
+    background:rgba(200,245,66,.09);color:var(--acc);font-family:var(--mono);font-weight:700;
+  }
+  .act .tt{font-weight:600;font-size:14px;color:var(--ink)}
+  .act .dd{font-size:12.5px;color:var(--dim)}
+  .act .arrow{margin-left:auto;color:var(--faint);font-family:var(--mono)}
+  .custody-note{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:10px;line-height:1.6}
+  .custody-note b{color:var(--dim);font-weight:600}
+
+  /* operator */
+  .op{display:flex;gap:14px;align-items:center}
+  .op .ava{
+    width:46px;height:46px;border-radius:10px;flex:none;
+    background:linear-gradient(135deg,#1c2320,#232a31);
+    border:1px solid var(--line2);
+    display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-weight:700;color:var(--acc);font-size:17px;
+  }
+  .op .who b{font-size:14.5px}
+  .op .who .mono{font-size:12px;color:var(--dim)}
+  .op .who .tag{font-size:11.5px;color:var(--faint)}
+
+  /* footer */
+  footer{border-top:1px solid var(--line);margin-top:26px;padding:18px 0 34px;color:var(--faint);font-size:12px}
+  footer .cols{display:flex;gap:26px;flex-wrap:wrap;justify-content:space-between}
+  footer .mono{font-size:11px}
+  footer a{color:var(--dim);text-decoration:underline;text-underline-offset:3px}
+  footer a:hover{color:var(--acc)}
+
+  .rule{border:none;border-top:1px dashed var(--line);margin:22px 0}
+  .sect-label{font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--faint);text-transform:uppercase;margin:26px 0 12px}
+  .muted{color:var(--faint)}
+
+  .live{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--dim)}
+  .live .pulse{width:7px;height:7px;border-radius:50%;background:var(--acc)}
+  @media(prefers-reduced-motion:no-preference){.live .pulse{animation:pp 2.2s infinite}}
+  @keyframes pp{0%,100%{opacity:1}50%{opacity:.25}}
+
+  #conn{
+    position:fixed;bottom:16px;right:16px;z-index:20;
+    font-family:var(--mono);font-size:11.5px;
+    background:#0a0c0e;border:1px solid var(--line2);border-radius:8px;
+    padding:8px 13px;color:var(--dim);display:none;
+  }
+  #conn.bad{display:block;border-color:rgba(245,100,92,.5);color:var(--crit)}
 </style>
 </head>
 <body>
-<h1>🐹 Squeek<span class="pulse">Pulse</span> <span class="tag">wheel integrity radar</span></h1>
-<p class="sub">Independent monitor of the gap between the WHEELY9000 live measurement and what is actually
-<a href="https://docs.squeekchain.com/developers/" rel="noopener">settled on-chain</a>. Read-only, keyless, no wallet, no tracking.
-Data: <code>api.squeekchain.com/v1</code> · chain Sepolia (pinned 12 blocks behind tip).</p>
 
-<div class="grid">
-  <div class="card">
-    <h2>Integrity Index</h2>
-    <div class="big" id="score">…<span style="font-size:14px;color:var(--dim)">/100</span></div>
-    <div id="gauge"><div id="gaugeFill" style="width:0%"></div></div>
-    <div id="scoreWhy" class="dim" style="font-size:12px">computing…</div>
-  </div>
-  <div class="card">
-    <h2>Settlement lag <span class="tag">measured − on-chain settled</span></h2>
-    <div class="big" id="lag">…</div>
-    <div class="kv"><span>settled (anchor)</span><b id="settled">…</b></div>
-    <div class="kv"><span>queued (oracle buffer)</span><b id="queued">…</b></div>
-    <div class="kv"><span>measured (device, live)</span><b id="measured">…</b></div>
-    <div class="kv"><span>lag as % of measured</span><b id="lagPct">…</b></div>
-  </div>
-  <div class="card">
-    <h2>Wheel right now</h2>
-    <div class="big" id="rpm">… <span style="font-size:14px;color:var(--dim)">rpm</span></div>
-    <div class="kv"><span>speed</span><b id="speed">…</b></div>
-    <div class="kv"><span>core status</span><b id="coreSt">…</b></div>
-    <div class="kv"><span>total distance</span><b id="dist">…</b></div>
-    <div class="kv"><span>measurement age</span><b id="age">…</b></div>
-  </div>
-  <div class="card">
-    <h2>Pipeline health</h2>
-    <div class="kv"><span>oracle state</span><b id="oracle">…</b></div>
-    <div class="kv"><span>settlement queue</span><b id="queueSt">…</b></div>
-    <div class="kv"><span>incident open</span><b id="incident">…</b></div>
-    <div class="kv"><span>provenance</span><b id="prov">…</b></div>
-    <div class="kv"><span>installation</span><b id="inst">…</b></div>
-  </div>
-  <div class="card" style="grid-column:1/-1">
-    <h2>⚡ Holder actions <span class="tag">non-custodial</span></h2>
-    <div style="font-size:13px;color:var(--dim)">
-      Radar ini tetap read-only. Untuk <b>claim &amp; stake SQK satu klik</b>, buka
-      <a href="https://wiliyantoro.github.io/squeekfi/" rel="noopener">SqueekFi Hub → tab “Stake Actions”</a>
-      (sign tetap di wallet lu — situs tidak pernah pegang kunci).
-      Planner compound/merge juga ada di sana (pakai <code>quotePower()</code> kontrak asli).
-    </div>
-  </div>
-  <div class="card" style="grid-column:1/-1">
-    <h2>🔔 Alert center <span class="tag">client-side rules</span></h2>
-    <div id="alerts" class="dim" style="font-size:13px">listening…</div>
-    <div style="font-size:12px;color:var(--dim);margin-top:6px">
-      Rules: Index &lt;70 warn · &lt;40 crit · measurement stale · settlement incident.
-      Dedupe 10 menit. Riwayat alert disimpan lokal (localStorage) — tidak ada data yang dikirim ke mana pun.
-    </div>
-  </div>
-  <div class="card" style="grid-column:1/-1">
-    <h2>Settlement lag history (last 60 samples)</h2>
-    <canvas id="spark" width="900" height="64"></canvas>
-  </div>
-  <div class="card" style="grid-column:1/-1">
-    <h2>How the score works</h2>
-    <div style="font-size:13px;color:var(--dim)" id="formula">
-      Integrity Index = 100 − penalty, where penalty = lag% × 4 (capped 60) + freshness penalty (0/25/60)
-      + incident penalty (50) + oracle rejection (30). Purely computed client-side from public API values —
-      transparent, reproducible, and biased to warn rather than reassure.
-    </div>
-  </div>
+<div id="ticker">
+  <span class="cell">SQUEEKPULSE <b>v3.0.0</b></span>
+  <span class="cell">INDEX <b id="tk-idx">—</b></span>
+  <span class="cell">MEASURED <b id="tk-mea">—</b></span>
+  <span class="cell">SETTLED <b id="tk-set">—</b></span>
+  <span class="cell">LAG <b id="tk-lag">—</b></span>
+  <span class="cell" style="border-right:none">READ-ONLY · KEYLESS · <b>NO TRACKING</b></span>
 </div>
 
+<div class="wrap">
+
+<header>
+  <div class="brand">
+    <svg width="40" height="40" viewBox="0 0 32 32" aria-hidden="true">
+      <circle cx="16" cy="16" r="13" fill="none" stroke="#c8f542" stroke-width="2.5"/>
+      <circle cx="16" cy="16" r="3.5" fill="#c8f542"/>
+      <path d="M16 5v6M16 21v6M5 16h6M21 16h6" stroke="#c8f542" stroke-width="2"/>
+      <path d="M25.5 8.5l-3.4 3.4M6.5 23.5l3.4-3.4" stroke="#5c665f" stroke-width="1.6"/>
+    </svg>
+    <div>
+      <h1>SQUEEK<span>PULSE</span></h1>
+      <div class="sub">wheel integrity radar · squeekchain sepolia</div>
+    </div>
+    <div class="badges">
+      <span class="pill">sepolia · 11155111</span>
+      <span class="pill" id="pill-state">connecting…</span>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="gauge-box">
+    <svg width="200" height="200" viewBox="0 0 200 200">
+      <circle cx="100" cy="100" r="82" fill="none" stroke="#232a31" stroke-width="12"/>
+      <circle id="gauge-arc" cx="100" cy="100" r="82" fill="none" stroke="#c8f542" stroke-width="12"
+        stroke-linecap="round" stroke-dasharray="515.2" stroke-dashoffset="515.2"
+        transform="rotate(90 100 100)" style="transition:stroke-dashoffset .9s cubic-bezier(.2,.7,.2,1)"/>
+      <g id="gauge-ticks" stroke="#2e3740" stroke-width="2"></g>
+    </svg>
+    <div class="gauge-num">
+      <div class="n" id="gauge-n">··</div>
+      <div class="of">/ 100 INTEGRITY</div>
+    </div>
+  </div>
+  <div class="verdict">
+    <h2 id="verdict-h">Menghubungi radar…</h2>
+    <p id="verdict-p">Menarik snapshot pertama dari squeek-core. Kalau garis ini lama, bukan lu yang salah — kemungkinan upstream lagi ngambek.</p>
+    <div class="fine">formula: squeek-core canonical index · <span id="fine-age">age —</span> · <span id="fine-src">src —</span></div>
+    <div class="fine" style="margin-top:4px">
+      <span class="live"><span class="pulse"></span> live</span> · poll 30s · <span id="fine-rtt">rtt —</span>
+    </div>
+  </div>
+</section>
+
+<div class="sect-label">— settlement radar —</div>
+
+<div class="grid">
+
+  <div class="panel wide">
+    <h3><span class="dot" id="dot-chart"></span> index over time <span class="muted" style="margin-left:auto;letter-spacing:0;text-transform:none" id="chart-count">— samples</span></h3>
+    <div class="body" style="padding:8px 8px 0">
+      <canvas id="chart"></canvas>
+    </div>
+    <div class="chart-meta">
+      <span>min <b id="cm-min">—</b></span>
+      <span>max <b id="cm-max">—</b></span>
+      <span>latest <b id="cm-last">—</b></span>
+      <span style="margin-left:auto">hover buat inspeksi · sumber <b>/api/history</b></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3><span class="dot" id="dot-pipe"></span> pipeline health</h3>
+    <div class="body">
+      <table class="kv">
+        <tr><td>oracle state</td><td id="pv-oracle">—</td></tr>
+        <tr><td>settlement queue</td><td id="pv-queue">—</td></tr>
+        <tr><td>settlement lag</td><td id="pv-lag">—</td></tr>
+        <tr><td>measurement age</td><td id="pv-age">—</td></tr>
+        <tr><td>incident open</td><td id="pv-inc">—</td></tr>
+        <tr><td>installation</td><td id="pv-prov">—</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3><span class="dot" id="dot-wheel"></span> wheel right now</h3>
+    <div class="body">
+      <table class="kv">
+        <tr><td>rpm</td><td id="wh-rpm">—</td></tr>
+        <tr><td>speed</td><td id="wh-speed">—</td></tr>
+        <tr><td>core status</td><td id="wh-status">—</td></tr>
+        <tr><td>total distance</td><td id="wh-dist">—</td></tr>
+        <tr><td>last tick</td><td id="wh-tick">—</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3><span class="dot" id="dot-alerts"></span> alert center <span class="muted" style="margin-left:auto;letter-spacing:0;text-transform:none" id="al-count"></span></h3>
+    <div class="body" style="max-height:230px;overflow-y:auto">
+      <div id="al-list"><div class="empty">belum ada alert — ini kabar baik, biasanya.</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3><span class="dot"></span> operator</h3>
+    <div class="body op">
+      <div class="ava">7T</div>
+      <div class="who">
+        <b>7tomars</b> <span class="tag">· squeekchain member · operator radarnya</span><br>
+        <span class="mono">0xF24A…9885</span> <span class="tag">· attribution via squeekchain.json</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel wide">
+    <h3><span class="dot"></span> holder actions — non-custodial</h3>
+    <div class="body">
+      <div class="acts">
+        <a class="act" href="/squeekfi/">
+          <div class="ic">S</div>
+          <div>
+            <div class="tt">SqueekFi Hub — Stake Actions</div>
+            <div class="dd">claim &amp; stake SQK satu klik · swap &amp; pool (paper, dilabel jujur) · merge planner</div>
+          </div>
+          <div class="arrow">→</div>
+        </a>
+        <a class="act" href="/squeekfi/" target="_blank" rel="noopener">
+          <div class="ic">P</div>
+          <div>
+            <div class="tt">Planner — merge &amp; stake simulator</div>
+            <div class="dd">itung hasil merge sebelum eksekusi. dibuka di tab baru, gak ada state yang dibawa.</div>
+          </div>
+          <div class="arrow">↗</div>
+        </a>
+      </div>
+      <div class="custody-note">
+        <b>read the sign:</b> radar ini read-only. semua transaksi di-sign di wallet lu sendiri —
+        situs tidak pernah pegang private key, dan tidak akan pernah. kalau ada yang minta seed phrase
+        "buat sinkronisasi", itu bukan kami. tutup tabnya.
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<hr class="rule">
 <footer>
-  Not affiliated with Squeekchain. Built as a Genesis Buildooooor project.
-  All numbers parsed as BigInt; API responses are treated as untrusted input; nothing is written to any chain.
+  <div class="cols">
+    <div>
+      <div class="mono">squeekpulse v3.0.0 · hand-built, zero framework</div>
+      <div class="mono" style="margin-top:4px">data: squeek-core (same-origin) → api.squeekchain.com/v1 · chain: sepolia · angka BigInt, respons API dianggap input tak tepercaya</div>
+    </div>
+    <div>
+      <a href="/squeekfi/">squeekfi hub</a> ·
+      <a href="https://github.com/Wiliyantoro/squeekpulse" target="_blank" rel="noopener">source (github)</a> ·
+      <a href="https://github.com/Wiliyantoro/squeek-core" target="_blank" rel="noopener">core source</a> ·
+      <a href="/api/integrity" target="_blank" rel="noopener">raw api</a>
+    </div>
+  </div>
+  <div class="mono" style="margin-top:10px">
+    bukan nasihat keuangan. testnet, tapi kebiasaan aman itu gratis — pakai dari sekarang.
+  </div>
 </footer>
 
+</div><!-- /wrap -->
+<div id="chartTip"></div>
+<div id="conn">⚠ koneksi ke radar terputus — retry otomatis</div>
+
 <script>
+/* ============================================================
+   squeekpulse v3 engine
+   prinsip: satu sumber kebenaran (squeek-core). frontend cuma
+   render + alert lokal. gak ada keajaiban di sisi klien.
+   ============================================================ */
 "use strict";
-const API="https://api.squeekchain.com/v1/status";
-const LS="squeekpulse.hist.v1";
-const $=id=>document.getElementById(id);
-const cls=v=>v>90?"ok":v>60?"warn":"bad";
 
-/* ---- rate-limit aware fetcher: 1 endpoint, ETag/304, backoff on 429 ---- */
-let etag=null,retryAfter=0,lastOk=0;
-async function pull(){
-  if(retryAfter>Date.now()) throw new Error("backoff "+Math.ceil((retryAfter-Date.now())/1000)+"s");
-  const h=etag?{"If-None-Match":etag,"X-Request-Id":"squeekpulse-"+Date.now().toString(36)}:{"X-Request-Id":"squeekpulse-"+Date.now().toString(36)};
-  const c=new AbortController();const t=setTimeout(()=>c.abort(),8000);
-  try{
-    const r=await fetch(API,{headers:h,signal:c.signal,cache:"no-store"});
-    clearTimeout(t);
-    if(r.status===304){lastOk=Date.now();return null}
-    if(r.status===429){const ra=parseInt(r.headers.get("Retry-After")||"30",10);retryAfter=Date.now()+ra*1000;throw new Error("429")}
-    if(!r.ok) throw new Error("HTTP "+r.status);
-    const e=r.headers.get("ETag");if(e)etag=e;
-    lastOk=Date.now();
-    const j=await r.json();
-    if(j&&j.schemaVersion===undefined) throw new Error("schema missing");
-    return j;
-  }finally{clearTimeout(t)}
-}
+const $ = id => document.getElementById(id);
+const LS_ALERTS = "squeekpulse.alerts.v1";
+const fmt = n => n == null ? "—" : Number(n).toLocaleString("en-US");
+const pct = n => n == null ? "—" : n.toFixed(2) + "%";
+const hhmmss = ts => new Date(ts * 1000).toLocaleTimeString("id-ID", { hour12: false });
 
-/* ---- all big numbers as BigInt, never float ---- */
-const B=x=>{try{return BigInt(x)}catch{return 0n}};
-const fmt=x=>{let s=B(x).toString();return s.replace(/\B(?=(\d{3})+(?!\d))/g,",")};
-
-function score(m,b,sq){
-  let why=[],pen=0n;
-  const meas=B(m.cumulativeWorkUnits),set=B(b.anchor.cumulativeWork);
-  const lag=meas>set?meas-set:0n;
-  const lagPct=meas>0n?(lag*10000n/meas):0n;         // basis points
-  if(lagPct>0n){const p=lagPct*4n/100n;if(p>0n){const c=p>60n?60n:p;pen+=c;why.push("lag "+(Number(lagPct)/100).toFixed(2)+"% → −"+c)}}
-  const ageS=(Date.now()-Date.parse(m.observedAt))/1000;
-  const stale=m.staleAfterSeconds||120;
-  if(ageS>stale){pen+=60n;why.push("measurement STALE ("+Math.round(ageS)+"s > "+stale+"s) → −60")}
-  else if(ageS>stale/2){pen+=25n;why.push("measurement aging ("+Math.round(ageS)+"s) → −25")}
-  if(sq&&sq.incidentOpen){pen+=50n;why.push("settlement incident open → −50")}
-  if(sq&&sq.state&&sq.state!=="submitted"&&sq.state!=="idle"){pen+=30n;why.push("queue state "+sq.state+" → −30")}
-  const sc=100n-pen>0n?100n-pen:0n;
-  return{sc:Number(sc),lag,lagPct,why,ageS,stale};
-}
-
-function drawSpark(hist){
-  const c=$("spark"),g=c.getContext("2d");
-  g.clearRect(0,0,c.width,c.height);
-  if(hist.length<2)return;
-  const max=Math.max(...hist,1);
-  g.strokeStyle="#f97316";g.lineWidth=2;g.beginPath();
-  hist.forEach((v,i)=>{
-    const x=i/(hist.length-1)*c.width, y=c.height-4-(v/max)*(c.height-10);
-    i?g.lineTo(x,y):g.moveTo(x,y);
-  });
-  g.stroke();
-}
-
-let hist=JSON.parse(localStorage.getItem(LS)||"[]").slice(-60);
-
-function render(d){
-  if(!d)return; // 304
-  if(d.status&&d.status!=="available"){$("scoreWhy").textContent="API status: "+d.status+" — showing unknown, not zero";return}
-  const m=d.measurement||{},b=d.builder||{},sq=d.settlementQueue||{};
-  const s=score(m,b,sq);
-  $("lag").textContent=fmt(s.lag)+" work";
-  const lagScore=Math.max(0,100-Number(s.lagPct)*4/100);
-  $("lag").className="big "+cls(lagScore);
-  $("settled").textContent=fmt(b.anchor&&b.anchor.cumulativeWork);
-  $("queued").textContent=fmt(sq.projected&&sq.projected.cumulativeWork);
-  $("measured").textContent=fmt(m.cumulativeWorkUnits);
-  $("lagPct").textContent=(Number(s.lagPct)/100).toFixed(2)+"%";
-  $("rpm").textContent=(m.rpmMilli!==undefined?(Number(m.rpmMilli)/1000).toFixed(2):"…");
-  $("speed").textContent=m.speedMmPerSecond!==undefined?m.speedMmPerSecond+" mm/s":"…";
-  $("coreSt").textContent=m.coreStatus||"…";
-  $("dist").textContent=m.distanceMm!==undefined?fmt(m.distanceMm)+" mm":"…";
-  $("age").textContent=Math.round(s.ageS)+"s / stale at "+s.stale+"s";
-  $("age").className=s.ageS>s.stale?"bad":"ok";
-  $("oracle").textContent=(d.oracle&&d.oracle.state)||"…";
-  $("oracle").className=d.oracle&&d.oracle.state==="accepted"?"ok":"warn";
-  $("queueSt").textContent=sq.state||"…";
-  $("incident").textContent=sq.incidentOpen?"YES":"no";
-  $("incident").className=sq.incidentOpen?"bad":"ok";
-  $("prov").textContent=m.provenance||"…";
-  $("inst").textContent=d.installationId||"…";
-  $("score").innerHTML=s.sc+'<span style="font-size:14px;color:var(--dim)">/100</span>';
-  $("score").className="big "+cls(s.sc);
-  $("gaugeFill").style.width=s.sc+"%";
-  $("gaugeFill").style.background=s.sc>90?"var(--ok)":s.sc>60?"var(--warn)":"var(--bad)";
-  $("scoreWhy").textContent=s.why.length?s.why.join(" · "):"all checks clean";
-  hist.push(Number(s.lag));hist=hist.slice(-60);
-  localStorage.setItem(LS,JSON.stringify(hist));
-  drawSpark(hist);
-}
-
-// ---- Alert center (client-side, dedupe 10 menit) ----
-let alertLog=JSON.parse(localStorage.getItem("squeekpulse.alerts.v1")||"[]");
-function fireAlert(kind,level,msg){
-  const now=Date.now();
-  if(alertLog.some(a=>a.kind===kind&&now-a.ts<600000))return;
-  const a={ts:now,kind,level,msg};
-  alertLog.push(a);alertLog=alertLog.slice(-50);
-  localStorage.setItem("squeekpulse.alerts.v1",JSON.stringify(alertLog));
-  renderAlerts();
-}
-function renderAlerts(){
-  const el=$("alerts");if(!el)return;
-  if(!alertLog.length){el.textContent="no alerts yet — all rules quiet ✅";return}
-  el.innerHTML=alertLog.slice().reverse().map(a=>
-    '<div style="margin:2px 0">['+new Date(a.ts).toLocaleTimeString()+'] <b style="color:'+(a.level==="crit"?"var(--bad)":a.level==="warn"?"var(--warn)":"var(--dim)")+'">'+a.level.toUpperCase()+'</b> '+a.msg+'</div>').join("");
-}
-function checkAlerts(s){
-  if(!s)return;
-  if(s.sc<40)fireAlert("index","crit","Integrity Index CRITICAL: "+s.sc+"/100");
-  else if(s.sc<70)fireAlert("index","warn","Integrity Index dropped: "+s.sc+"/100");
-  if(s.ageS>s.stale)fireAlert("stale","warn","measurement STALE ("+Math.round(s.ageS)+"s)");
-  if(s.why&&s.why.some(w=>/incident/.test(w)))fireAlert("incident","crit","settlement incident open");
-}
-renderAlerts();
-
-async function tick(){
-  try{const d=await pull();render(d);
-    // hitung ulang skor utk alert (render sudah set DOM)
-    const sc=parseInt($("score").textContent)||null;
-    if(sc!==null){checkAlerts({sc,ageS:parseFloat(($("age").textContent||"").replace(/[^0-9.]/g,""))||0,stale:120,why:($("scoreWhy").textContent||"").split("·")});}
+/* ---------- gauge ticks (dibangun sekali, statis) ---------- */
+(function ticks() {
+  const g = $("gauge-ticks");
+  let s = "";
+  for (let i = 0; i <= 10; i++) {
+    const a = Math.PI * (1 + i / 10);
+    const r1 = 68, r2 = 74;
+    s += `<line x1="${100 + r1 * Math.cos(a)}" y1="${100 + r1 * Math.sin(a)}"
+               x2="${100 + r2 * Math.cos(a)}" y2="${100 + r2 * Math.sin(a)}"/>`;
   }
-  catch(e){$("scoreWhy").textContent="fetch problem: "+e.message+" (retrying — no fabricated data)"}
+  g.innerHTML = s;
+})();
+
+/* ---------- verdict copy — ditulis tangan, bukan generator ---------- */
+function verdictFor(idx, fresh) {
+  if (!fresh) return { h: "Pipe dingin — data terakhir basi",
+    p: "Radar gak dapat update baru dari upstream. Angka yang tampil adalah snapshot terakhir yang sempat dipegang. Jangan Buat Keputusan Dari Ini." };
+  if (idx >= 95) return { h: "Roda sehat, settlement rapi",
+    p: "Jarak antara pengukuran live dan settled on-chain ada di rentang normal. Tidak ada anomali antrean. Lanjutkan." };
+  if (idx >= 80) return { h: "Sehat, dengan catatan kecil",
+    p: "Lag masih dalam toleransi tapi bukan nol. Normal untuk wheel yang sedang jalan. Pantau tren, bukan angka tunggal." };
+  if (idx >= 60) return { h: "Perlu diperhatikan",
+    p: "Ada gesekan di pipeline — lag naik atau antrean settlement nggak ideal. Belum darurat, tapi jangan tunda kalau makin melebar." };
+  return { h: "Anomali serius",
+    p: "Index di bawah 60: settlement jauh tertinggal dari pengukuran, atau antrean bermasalah. Cek incident sebelum berinteraksi dengan wheel." };
 }
-tick();setInterval(tick,3000);
+
+/* ---------- gauge ---------- */
+const ARC = 515.2; // 2πr, r=82
+function setGauge(idx) {
+  const v = Math.max(0, Math.min(100, idx));
+  $("gauge-n").textContent = Math.round(v);
+  $("gauge-arc").style.strokeDashoffset = ARC * (1 - v / 100);
+  const col = v >= 80 ? "#c8f542" : v >= 60 ? "#f5c542" : "#f5645c";
+  $("gauge-arc").style.stroke = col;
+  $("gauge-n").style.color = col;
+}
+
+/* ---------- ticker + panels ---------- */
+function renderAll(d) {
+  const idx = d.index;
+  setGauge(idx);
+  $("tk-idx").textContent = Math.round(idx) + "/100";
+  $("tk-mea").textContent = fmt(d.measured);
+  $("tk-set").textContent = fmt(d.settled);
+  $("tk-lag").textContent = pct(d.lagPct);
+
+  const v = verdictFor(idx, d.fresh);
+  $("verdict-h").textContent = v.h;
+  $("verdict-p").textContent = v.p;
+  const pill = $("pill-state");
+  pill.textContent = d.fresh ? "live · fresh" : "stale";
+  pill.className = "pill " + (d.fresh ? "ok" : "warn");
+  $("fine-age").textContent = "age " + (d.fresh ? "ok" : ">120s");
+
+  $("pv-lag").textContent = pct(d.lagPct);
+  $("pv-lag").className = d.lagPct > 5 ? "bad" : d.lagPct > 2 ? "warn" : "ok";
+  $("pv-age").textContent = d.fresh ? "fresh" : "stale";
+  $("pv-age").className = d.fresh ? "ok" : "bad";
+  $("wh-tick").textContent = hhmmss(d.ts);
+
+  const dot = d.fresh ? "dot" : "dot warn";
+  $("dot-chart").className = dot;
+  $("dot-wheel").className = dot;
+  $("dot-pipe").className = dot;
+}
+
+/* fields opsional — squeek-core belum selalu ngirim ini; tampilkan apa adanya */
+function renderOptional(snap) {
+  const put = (id, val, cls) => { const el = $(id); if (!el) return; el.textContent = val ?? "—"; if (cls !== undefined) el.className = cls; };
+  put("pv-oracle", snap.oracle);
+  put("pv-queue", snap.queue ?? (snap.fresh === false ? "—" : "empty"), snap.fresh === false ? undefined : "ok");
+  put("pv-inc", snap.incident == null ? "—" : (snap.incident ? "YES" : "no"), snap.incident ? "bad" : "ok");
+  put("pv-prov", snap.installation);
+  put("wh-rpm", snap.rpm != null ? Number(snap.rpm).toFixed(2) : null);
+  put("wh-speed", snap.speed != null ? snap.speed + " mm/s" : null);
+  put("wh-status", snap.status, snap.status ? "ok" : undefined);
+  put("wh-dist", snap.distance != null ? fmt(snap.distance) + " mm" : null);
+}
+
+/* ---------- chart: canvas 2d, digambar tangan ---------- */
+let series = [];           // [{ts,index}]
+const chart = $("chart");
+const ctx = chart.getContext("2d");
+
+function drawChart() {
+  const dpr = window.devicePixelRatio || 1;
+  const W = chart.clientWidth, H = chart.clientHeight;
+  if (!W) return;
+  chart.width = W * dpr; chart.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const padL = 34, padR = 10, padT = 12, padB = 20;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const mono = "10px " + getComputedStyle(document.body).getPropertyValue("--mono");
+
+  ctx.strokeStyle = "#1a2026"; ctx.fillStyle = "#5c665f";
+  ctx.font = mono; ctx.textAlign = "right"; ctx.lineWidth = 1;
+  for (const yv of [0, 25, 50, 75, 100]) {
+    const y = padT + ih * (1 - yv / 100);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+    ctx.fillText(yv, padL - 6, y + 3);
+  }
+
+  if (series.length < 2) {
+    ctx.fillStyle = "#5c665f"; ctx.textAlign = "center";
+    ctx.fillText("menunggu cukup sampel dari /api/history …", W / 2, H / 2);
+    return;
+  }
+
+  const xs = i => padL + iw * (i / (series.length - 1));
+  const ys = v => padT + ih * (1 - v / 100);
+
+  const grad = ctx.createLinearGradient(0, padT, 0, padT + ih);
+  grad.addColorStop(0, "rgba(200,245,66,.16)");
+  grad.addColorStop(1, "rgba(200,245,66,0)");
+  ctx.beginPath();
+  series.forEach((p, i) => i ? ctx.lineTo(xs(i), ys(p.index)) : ctx.moveTo(xs(0), ys(p.index)));
+  ctx.lineTo(xs(series.length - 1), padT + ih);
+  ctx.lineTo(xs(0), padT + ih);
+  ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+
+  ctx.beginPath();
+  series.forEach((p, i) => i ? ctx.lineTo(xs(i), ys(p.index)) : ctx.moveTo(xs(0), ys(p.index)));
+  ctx.strokeStyle = "#c8f542"; ctx.lineWidth = 1.8; ctx.lineJoin = "round"; ctx.stroke();
+
+  const last = series[series.length - 1];
+  ctx.beginPath(); ctx.arc(xs(series.length - 1), ys(last.index), 3.2, 0, 7);
+  ctx.fillStyle = "#c8f542"; ctx.fill();
+
+  ctx.fillStyle = "#5c665f"; ctx.font = mono;
+  ctx.textAlign = "left";
+  ctx.fillText(hhmmss(series[0].ts), padL, H - 6);
+  ctx.textAlign = "right";
+  ctx.fillText(hhmmss(last.ts), W - padR, H - 6);
+
+  const vals = series.map(p => p.index);
+  $("cm-min").textContent = Math.min(...vals).toFixed(1);
+  $("cm-max").textContent = Math.max(...vals).toFixed(1);
+  $("cm-last").textContent = last.index.toFixed(1);
+  $("chart-count").textContent = series.length + " samples";
+}
+
+chart.addEventListener("mousemove", e => {
+  if (series.length < 2) return;
+  const r = chart.getBoundingClientRect();
+  const padL = 34, padR = 10, iw = r.width - padL - padR;
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left - padL) / iw));
+  const p = series[Math.round(frac * (series.length - 1))];
+  if (!p) return;
+  const tip = $("chartTip");
+  tip.style.display = "block";
+  tip.style.left = (e.clientX + 12) + "px";
+  tip.style.top = (e.clientY - 34) + "px";
+  tip.innerHTML = hhmmss(p.ts) + " · <b>" + p.index.toFixed(1) + "</b>";
+});
+chart.addEventListener("mouseleave", () => $("chartTip").style.display = "none");
+
+/* ---------- alerts — logic v2 dipertahankan, tampilan baru ---------- */
+let alertLog = [];
+try { alertLog = JSON.parse(localStorage.getItem(LS_ALERTS) || "[]"); } catch (e) { alertLog = []; }
+
+function saveAlerts() { localStorage.setItem(LS_ALERTS, JSON.stringify(alertLog)); }
+
+function fireAlert(kind, level, msg) {
+  const now = Date.now();
+  const dup = alertLog.find(a => a.kind === kind && now - a.ts < 600000); // dedupe 10 menit
+  if (dup) return;
+  alertLog.unshift({ ts: now, kind, level, msg });
+  if (alertLog.length > 50) alertLog.length = 50;
+  saveAlerts(); renderAlerts();
+}
+
+function renderAlerts() {
+  const box = $("al-list");
+  $("al-count").textContent = alertLog.length ? alertLog.length + " tersimpan" : "";
+  if (!alertLog.length) {
+    box.innerHTML = '<div class="empty">belum ada alert — ini kabar baik, biasanya.</div>';
+    return;
+  }
+  box.innerHTML = alertLog.map(a =>
+    `<div class="alert-row"><span class="t">${hhmmss(a.ts / 1000)}</span><span class="lv ${a.level}">${a.level}</span><span>${a.msg}</span></div>`
+  ).join("");
+}
+
+function checkAlerts(d) {
+  const idx = d.index;
+  if (!d.fresh) fireAlert("stale", "crit", "Data radar STALE — upstream tidak merespons atau wheel berhenti ngirim.");
+  else if (idx < 40) fireAlert("index", "crit", `Integrity Index KRITIS: ${Math.round(idx)}/100. Settlement jauh tertinggal.`);
+  else if (idx < 70) fireAlert("index", "warn", `Integrity Index rendah: ${Math.round(idx)}/100 — pantau tren.`);
+  else fireAlert("ok", "info", `Integrity Index healthy: ${Math.round(idx)}/100.`);
+}
+
+/* ---------- polling + SSE ---------- */
+async function pullOnce() {
+  const t0 = performance.now();
+  const r = await fetch("/api/integrity", { cache: "no-store" });
+  $("fine-rtt").textContent = "rtt " + Math.round(performance.now() - t0) + " ms";
+  $("fine-src").textContent = "src squeek-core · same-origin";
+  const d = await r.json();
+  d.ts = d.ts || Math.floor(Date.now() / 1000);
+  renderAll(d); renderOptional(d); checkAlerts(d);
+  if (!series.length || series[series.length - 1].ts !== d.ts) {
+    series.push({ ts: d.ts, index: d.index });
+    if (series.length > 2880) series.shift();   // 24 jam @30s — sama kayak core
+    drawChart();
+  }
+}
+
+let backoff = 15000;
+async function loop() {
+  try {
+    await pullOnce();
+    backoff = 30000;
+    $("conn").className = "";
+  } catch (e) {
+    $("conn").className = "bad";
+    fireAlert("conn", "crit", "Koneksi ke squeek-core terputus — retry otomatis jalan.");
+    backoff = Math.min(backoff * 2, 120000);      // exponential, max 2 menit
+  }
+  setTimeout(loop, backoff);
+}
+
+function listenStream() {
+  try {
+    const es = new EventSource("/api/stream");
+    es.onmessage = ev => {
+      try {
+        const d = JSON.parse(ev.data);
+        if (d && d.index != null) {
+          renderAll(d); renderOptional(d); checkAlerts(d);
+          if (!series.length || series[series.length - 1].ts !== d.ts) {
+            series.push({ ts: d.ts || Math.floor(Date.now() / 1000), index: d.index });
+            if (series.length > 2880) series.shift();
+            drawChart();
+          }
+        }
+      } catch (e) { /* chunk rusak → skip, jangan matiin stream */ }
+    };
+    es.onerror = () => { es.close(); setTimeout(listenStream, 45000); };
+  } catch (e) { /* browser gak dukung SSE → polling doang, tetap hidup */ }
+}
+
+async function loadHistory() {
+  try {
+    const r = await fetch("/api/history", { cache: "no-store" });
+    const arr = await r.json();
+    if (Array.isArray(arr) && arr.length) {
+      series = arr.slice(-2880).map(p => ({ ts: p.ts, index: p.index }));
+      drawChart();
+    }
+  } catch (e) { /* polling akan mengisi */ }
+}
+
+/* ---------- init ---------- */
+renderAlerts();
+window.addEventListener("resize", drawChart);
+loadHistory();
+loop();
+listenStream();
 </script>
 </body>
 </html>
